@@ -1,0 +1,95 @@
+# Combined Source Code: Road Safety AI - Phase 2
+
+# 1. Import Libraries
+import pandas as pd
+import numpy as np
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, roc_auc_score
+import seaborn as sns
+import matplotlib.pyplot as plt
+import folium
+from flask import Flask, request, jsonify
+import joblib
+
+# 2. Data Loading and Merging
+def load_and_merge_data(sensor_path, accident_path, crowd_path, weather_path):
+    sensor = pd.read_csv(sensor_path)
+    accidents = pd.read_csv(accident_path)
+    crowd = pd.read_parquet(crowd_path)
+    weather = pd.read_json(weather_path)
+    
+    df = sensor.merge(accidents, on=['location_id', 'timestamp'], how='left')
+    df = df.merge(crowd, on=['location_id', 'timestamp'], how='left')
+    df = df.merge(weather, on='timestamp', how='left')
+    return df
+
+# 3. Preprocessing
+def preprocess(df):
+    df.drop_duplicates(inplace=True)
+    imputer = KNNImputer(n_neighbors=3)
+    numeric_cols = df.select_dtypes(include='number').columns
+    df[numeric_cols] = imputer.fit_transform(df[numeric_cols])
+    df.fillna(method='ffill', inplace=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['hour'] = df['timestamp'].dt.hour
+    df['day'] = df['timestamp'].dt.dayofweek
+    scaler = StandardScaler()
+    df[numeric_cols] = scaler.fit_transform(df[numeric_cols])
+    return df
+
+# 4. EDA Functions
+def plot_distributions(df, column):
+    sns.histplot(df[column], kde=True)
+    plt.title(f'Distribution of {column}')
+    plt.show()
+
+def correlation_matrix(df):
+    corr = df.corr()
+    sns.heatmap(corr, annot=False, cmap='coolwarm')
+    plt.title("Correlation Matrix")
+    plt.show()
+
+# 5. Feature Engineering
+def feature_engineering(df):
+    df['risk_score'] = df['traffic_density'] * (1 - df['road_friction'])
+    df['proximity_index'] = df['pedestrian_count'] / (df['vehicle_speed'] + 1)
+    df['is_peak_hour'] = df['hour'].apply(lambda x: 1 if 7 <= x <= 9 or 17 <= x <= 19 else 0)
+    return df
+
+# 6. Model Training
+def train_models(X_train, y_train):
+    rf = RandomForestClassifier(n_estimators=100, random_state=42)
+    xgb = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
+    rf.fit(X_train, y_train)
+    xgb.fit(X_train, y_train)
+    return rf, xgb
+
+def evaluate_model(model, X_test, y_test):
+    preds = model.predict(X_test)
+    print(classification_report(y_test, preds))
+    print("ROC AUC:", roc_auc_score(y_test, model.predict_proba(X_test), multi_class='ovo'))
+
+# 7. Folium Risk Map
+def generate_map(df):
+    m = folium.Map(location=[df['lat'].mean(), df['lon'].mean()], zoom_start=13)
+    for _, row in df.iterrows():
+        folium.CircleMarker(
+            location=(row['lat'], row['lon']),
+            radius=5,
+            popup=f"Risk Score: {row['risk_score']}",
+            color='red' if row['risk_score'] > 0.7 else 'orange',
+            fill=True
+        ).add_to(m)
+    m.save("risk_map.html")
+
+# 8. Flask API (Deploy Separately)
+app = Flask(__name__)
+@app.route('/predict', methods=['POST'])
+def predict():
+    input_data = pd.DataFrame([request.json])
+    prediction = model.predict(input_data)
+    return jsonify({'prediction': int(prediction[0])})
